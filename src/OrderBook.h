@@ -28,4 +28,32 @@ private:
 public:
     void insertOrder(const Order& order);
     void printOrderBook() const;
+
+    // Fetch the highest active buy price for the Python AI
+    double getBestBid() const {
+        if (bids.empty()) {
+            return 0.0; 
+        }
+        double bestPrice = bids[0].price;
+        for (const auto& level : bids) {
+            if (level.price > bestPrice) {
+                bestPrice = level.price;
+            }
+        }
+        return bestPrice;
+    }
+
+    // Fetch the lowest active sell price for the Python AI
+    double getBestAsk() const {
+        if (asks.empty()) {
+            return 0.0; 
+        }
+        double bestPrice = asks[0].price;
+        for (const auto& level : asks) {
+            if (level.price < bestPrice) {
+                bestPrice = level.price;
+            }
+        }
+        return bestPrice;
+    }
 };
