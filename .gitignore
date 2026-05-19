@@ -1,0 +1,4 @@
+# Ignore the generated build folder
+build/
+*.exe
+.vscode/
