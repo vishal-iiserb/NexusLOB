@@ -1,13 +1,14 @@
 import os
-# TODO: 
+# TODO
 os.add_dll_directory(r"C:/mingw64/bin") 
 
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 import time 
+import random 
 
-import nexus_engine # my custom C++ baby
+import nexus_engine 
 
 class NexusTradingEnv(gym.Env):
     def __init__(self):
@@ -21,20 +22,22 @@ class NexusTradingEnv(gym.Env):
         )
         
         # --- THE WALLET ---
-        # Giving the AI a 10k paper trading account so it has something to lose
         self.initial_balance = 10000.0  
         self.balance = self.initial_balance
-        self.position = 0               # tracking how many shares it currently holds
+        self.position = 0               
         self.net_worth = self.initial_balance
         
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self.engine = nexus_engine.OrderBook()
         
-        # Gotta wipe the bank account clean every time the game restarts
+        # Reset the wallet
         self.balance = self.initial_balance
         self.position = 0
         self.net_worth = self.initial_balance
+        
+        # Inject some initial orders so the book isn't completely empty at the start
+        self._inject_noise_traders(mid_price=100.0, num_bots=10)
         
         return self._get_obs(), {}
         
@@ -42,66 +45,79 @@ class NexusTradingEnv(gym.Env):
         bid = self.engine.get_best_bid()
         ask = self.engine.get_best_ask()
         return np.array([bid, ask], dtype=np.float32)
-        
+
+    def _inject_noise_traders(self, mid_price, num_bots=3):
+        # This function creates fake traders to mess with the AI and create a real market
+        for _ in range(num_bots):
+            order = nexus_engine.Order()
+            # Unique ID for the bot orders
+            order.orderId = "BOT_" + str(int(time.time() * 1000000))[-6:] + str(random.randint(10, 99))
+            order.symbol = "NEXUS"
+            order.quantity = random.randint(1, 5) * 10  # Bots trade 10 to 50 shares
+            order.timestamp = int(time.time() * 1000)
+            
+            # 50/50 coin flip: is this bot buying or selling?
+            if random.random() > 0.5:
+                order.type = nexus_engine.OrderType.BUY
+                order.price = round(mid_price - random.uniform(0.1, 1.5), 2)
+            else:
+                order.type = nexus_engine.OrderType.SELL
+                order.price = round(mid_price + random.uniform(0.1, 1.5), 2)
+                
+            self.engine.insert_order(order)
+            
     def step(self, action):
-        # Snapshot the net worth before the trade to calculate profit later
         prev_net_worth = self.net_worth
         
         bid = self.engine.get_best_bid()
         ask = self.engine.get_best_ask()
         
-        # If order book is empty, just pretend the stock is $100 so it doesn't break
-        current_market_price = bid if bid > 0 else 100.0 
-        
+        # Calculate a rough "mid price" for the stock
+        if bid > 0 and ask > 0:
+            mid_price = (bid + ask) / 2.0
+        else:
+            mid_price = bid if bid > 0 else 100.0
+            
+        # 1. Let the AI take its action
         if action == 1 or action == 2:
             order = nexus_engine.Order()
-            
-            # Lazy random id generation just for fun
             order.orderId = "AI_" + str(int(time.time() * 1000))[-6:] 
             order.symbol = "NEXUS"
-            order.quantity = 10  # Let's just trade 10 shares at a time for now
+            order.quantity = 10 
             order.timestamp = int(time.time() * 1000)
 
             if action == 1: # BUY
                 order.type = nexus_engine.OrderType.BUY
-                order.price = 100.0 if bid == 0.0 else bid + 0.1 
+                order.price = round(mid_price + 0.1, 2) 
                 
-                # Pay for the shares: Cash goes down, shares go up
                 cost = order.price * order.quantity
                 self.balance -= cost
                 self.position += order.quantity
                 
             elif action == 2: # SELL
-                # NOTE TO SELF: Only let it sell if it actually owns shares! 
-                # (No naked shorting yet, too complicated)
                 if self.position >= order.quantity:
                     order.type = nexus_engine.OrderType.SELL
-                    order.price = 105.0 if ask == 0.0 else ask - 0.1
+                    order.price = round(mid_price - 0.1, 2) 
                     
-                    # Get paid: Cash goes up, shares go down
                     revenue = order.price * order.quantity
                     self.balance += revenue
                     self.position -= order.quantity
 
-            # Fire it into the C++ engine
             self.engine.insert_order(order)
             
-        # 3. Calculate new net worth AFTER the trade
+        # 2. INJECT MARKET CHAOS! 
+        self._inject_noise_traders(mid_price, num_bots=random.randint(1, 4))
+            
+        # 3. Calculate new net worth
         obs = self._get_obs()
-        new_bid = obs[0] if obs[0] > 0 else current_market_price
+        new_bid = obs[0] if obs[0] > 0 else mid_price
         
-        # Net Worth = Pure Cash + (Shares Owned * Current Share Price)
-        # Using the bid price to value inventory to be conservative
         self.net_worth = self.balance + (self.position * new_bid)
-        
-        # 4. THE REWARD FUNCTION
-        # If it made money, reward is positive. If it lost money, reward is negative.
         reward = self.net_worth - prev_net_worth
         
         terminated = False
         truncated = False
         
-        # Shoving all this extra data into info so I can print it and debug it
         info = {
             "balance": self.balance,
             "position": self.position,
