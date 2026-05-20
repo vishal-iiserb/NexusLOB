@@ -10,7 +10,7 @@ print("Attaching the PPO brain...")
 model = PPO("MlpPolicy", env, verbose=1)
 
 print("Starting the training montage... (10,000 steps)")
-model.learn(total_timesteps=10000)
+model.learn(total_timesteps=100000)
 
 print("Training finished! Saving the data to disk...")
 model.save("nexus_quant_brain")
