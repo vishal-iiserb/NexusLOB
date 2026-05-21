@@ -18,8 +18,9 @@ class NexusTradingEnv(gym.Env):
             print(f"Error loading C++ Engine: {e}")
             self.engine = None
         self.action_space = spaces.Discrete(3)
+        
         self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(5,), dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(7,), dtype=np.float32
         )
         self.initial_balance = 10000.0  
         self.balance = self.initial_balance
@@ -27,12 +28,11 @@ class NexusTradingEnv(gym.Env):
         self.net_worth = self.initial_balance
         self.price_history = []
         self.current_step = 0
-        self.max_episode_steps = 200 # Fixed cutoff to prevent endless loops
+        self.max_episode_steps = 200 
         
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         
-   
         if self.engine is not None:
             try:
                 self.engine = nexus_engine.OrderBook()
@@ -57,15 +57,34 @@ class NexusTradingEnv(gym.Env):
             except:
                 pass
                 
-       
         if bid <= 0: bid = 100.0
         if ask <= 0: ask = 100.0
         
         sma = 100.0
         if len(self.price_history) > 0:
-            sma = sum(self.price_history) / len(self.price_history)
+            sma = sum(self.price_history[-10:]) / len(self.price_history[-10:])
             
-        return np.array([bid, ask, self.balance, self.position, sma], dtype=np.float32)
+        rsi = 50.0
+        if len(self.price_history) >= 14:
+            gains, losses = 0, 0
+            for i in range(len(self.price_history) - 13, len(self.price_history)):
+                change = self.price_history[i] - self.price_history[i-1]
+                if change > 0:
+                    gains += change
+                else:
+                    losses += abs(change)
+            if losses == 0:
+                rsi = 100.0
+            else:
+                rsi = 100.0 - (100.0 / (1.0 + (gains / losses)))
+                
+        macd = 0.0
+        if len(self.price_history) >= 26:
+            ema12 = sum(self.price_history[-12:]) / 12
+            ema26 = sum(self.price_history[-26:]) / 26
+            macd = ema12 - ema26
+            
+        return np.array([bid, ask, self.balance, self.position, sma, rsi, macd], dtype=np.float32)
 
     def _inject_noise_traders(self, mid_price, num_bots=2):
         if self.engine is None or self.current_step > self.max_episode_steps:
@@ -102,13 +121,12 @@ class NexusTradingEnv(gym.Env):
         mid_price = (bid + ask) / 2.0
             
         self.price_history.append(mid_price)
-        if len(self.price_history) > 10:
+        if len(self.price_history) > 35:
             self.price_history.pop(0)
             
         trade_executed = False
         
-        # Action execution logic
-        if action == 1: # BUY 10 shares
+        if action == 1: 
             estimated_cost = ask * 10
             if self.balance >= estimated_cost:
                 if self.engine is not None:
@@ -126,7 +144,7 @@ class NexusTradingEnv(gym.Env):
                 self.position += 10
                 trade_executed = True
                 
-        elif action == 2: # SELL 10 shares
+        elif action == 2: 
             if self.position >= 10:
                 if self.engine is not None:
                     try:
@@ -143,14 +161,11 @@ class NexusTradingEnv(gym.Env):
                 self.position -= 10
                 trade_executed = True
             
-    
         self._inject_noise_traders(mid_price, num_bots=random.randint(1, 2))
             
-      
         new_obs = self._get_obs()
         self.net_worth = self.balance + (self.position * new_obs[0])
         
-        # Reward design
         reward = self.net_worth - prev_net_worth
         if (action == 1 or action == 2) and not trade_executed:
             reward -= 2.0 
@@ -160,7 +175,6 @@ class NexusTradingEnv(gym.Env):
         terminated = False
         truncated = False
         
-      
         if self.current_step >= self.max_episode_steps:
             truncated = True
             
