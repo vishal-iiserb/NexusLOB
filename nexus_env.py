@@ -176,6 +176,7 @@ class NexusTradingEnv(gym.Env):
         truncated = False
         
         if self.current_step >= self.max_episode_steps:
+            terminated = True
             truncated = True
             
         info = {
