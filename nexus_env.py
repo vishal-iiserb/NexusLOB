@@ -4,9 +4,7 @@ os.add_dll_directory(r"C:\mingw64\bin")
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
-import time 
-import random 
-import math
+import csv
 import nexus_engine 
 
 class NexusTradingEnv(gym.Env):
@@ -17,19 +15,35 @@ class NexusTradingEnv(gym.Env):
         except Exception as e:
             print(f"Error loading C++ Engine: {e}")
             self.engine = None
+            
         self.action_space = spaces.Discrete(3)
-        
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(7,), dtype=np.float32
         )
+        
         self.initial_balance = 10000.0  
         self.balance = self.initial_balance
         self.position = 0               
         self.net_worth = self.initial_balance
         self.price_history = []
         self.current_step = 0
-        self.max_episode_steps = 200 
         
+        # Load the real historical CSV data into memory using simple loops
+        self.csv_prices = []
+        try:
+            with open("real_market_data.csv", mode="r") as f:
+                reader = csv.reader(f)
+                header = next(reader) 
+                for row in reader:
+                    close_price = float(row[4])
+                    self.csv_prices.append(close_price)
+        except Exception as e:
+            print(f"Error loading CSV file: {e}")
+        
+        self.max_episode_steps = len(self.csv_prices) - 1
+        if self.max_episode_steps <= 0:
+            self.max_episode_steps = 200 # fallback
+
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         
@@ -44,23 +58,24 @@ class NexusTradingEnv(gym.Env):
         self.net_worth = self.initial_balance
         self.price_history = []
         self.current_step = 0
- 
-        self._inject_noise_traders(mid_price=100.0, num_bots=5)
+
+        for i in range(min(35, len(self.csv_prices))):
+            self.price_history.append(self.csv_prices[i])
+            self.current_step += 1
+            
         return self._get_obs(), {}
         
     def _get_obs(self):
-        bid, ask = 100.0, 100.0
-        if self.engine is not None:
-            try:
-                bid = self.engine.get_best_bid()
-                ask = self.engine.get_best_ask()
-            except:
-                pass
-                
-        if bid <= 0: bid = 100.0
-        if ask <= 0: ask = 100.0
+        # Read the active real price from our loaded historical list
+        current_real_price = 100.0
+        if self.current_step < len(self.csv_prices):
+            current_real_price = self.csv_prices[self.current_step]
+            
+        # Since we are backtesting offline, simulate spread around the historical price
+        bid = current_real_price - 0.02
+        ask = current_real_price + 0.02
         
-        sma = 100.0
+        sma = current_real_price
         if len(self.price_history) > 0:
             sma = sum(self.price_history[-10:]) / len(self.price_history[-10:])
             
@@ -86,32 +101,6 @@ class NexusTradingEnv(gym.Env):
             
         return np.array([bid, ask, self.balance, self.position, sma, rsi, macd], dtype=np.float32)
 
-    def _inject_noise_traders(self, mid_price, num_bots=2):
-        if self.engine is None or self.current_step > self.max_episode_steps:
-            return
-            
-        wave = 5.0 * math.sin(self.current_step / 15.0)
-        trend_price = mid_price + wave
-        
-        for _ in range(num_bots):
-            try:
-                order = nexus_engine.Order()
-                order.orderId = "BOT_" + str(int(time.time() * 1000000))[-6:] + str(random.randint(10, 99))
-                order.symbol = "NEXUS"
-                order.quantity = 10 
-                order.timestamp = int(time.time() * 1000)
-                
-                if random.random() > 0.4:
-                    order.type = nexus_engine.OrderType.BUY
-                    order.price = round(trend_price - random.uniform(0.05, 0.2), 2)
-                else:
-                    order.type = nexus_engine.OrderType.SELL
-                    order.price = round(trend_price + random.uniform(0.05, 0.2), 2)
-                    
-                self.engine.insert_order(order)
-            except:
-                pass
-            
     def step(self, action):
         self.current_step += 1
         prev_net_worth = self.net_worth
@@ -126,51 +115,28 @@ class NexusTradingEnv(gym.Env):
             
         trade_executed = False
         
-        if action == 1: 
+        if action == 1: # BUY 10 shares
             estimated_cost = ask * 10
             if self.balance >= estimated_cost:
-                if self.engine is not None:
-                    try:
-                        order = nexus_engine.Order()
-                        order.orderId = "AI_" + str(int(time.time() * 1000))[-6:]
-                        order.symbol = "NEXUS"
-                        order.quantity = 10
-                        order.type = nexus_engine.OrderType.BUY
-                        order.price = ask
-                        self.engine.insert_order(order)
-                    except:
-                        pass
                 self.balance -= estimated_cost
                 self.position += 10
                 trade_executed = True
                 
-        elif action == 2: 
+        elif action == 2: # SELL 10 shares
             if self.position >= 10:
-                if self.engine is not None:
-                    try:
-                        order = nexus_engine.Order()
-                        order.orderId = "AI_" + str(int(time.time() * 1000))[-6:]
-                        order.symbol = "NEXUS"
-                        order.quantity = 10
-                        order.type = nexus_engine.OrderType.SELL
-                        order.price = bid
-                        self.engine.insert_order(order)
-                    except:
-                        pass
                 self.balance += (bid * 10)
                 self.position -= 10
                 trade_executed = True
             
-        self._inject_noise_traders(mid_price, num_bots=random.randint(1, 2))
-            
         new_obs = self._get_obs()
         self.net_worth = self.balance + (self.position * new_obs[0])
         
+        # Reward function focused on net worth changes
         reward = self.net_worth - prev_net_worth
         if (action == 1 or action == 2) and not trade_executed:
             reward -= 2.0 
         if action == 0:
-            reward -= 0.1  
+            reward -= 0.05 # minor holding fee
             
         terminated = False
         truncated = False
