@@ -12,8 +12,7 @@ class NexusTradingEnv(gym.Env):
         super(NexusTradingEnv, self).__init__()
         try:
             self.engine = nexus_engine.OrderBook()
-        except Exception as e:
-            print(f"Error loading C++ Engine: {e}")
+        except:
             self.engine = None
             
         self.action_space = spaces.Discrete(3)
@@ -28,37 +27,32 @@ class NexusTradingEnv(gym.Env):
         self.price_history = []
         self.current_step = 0
         
-        # Load the real historical CSV data into memory using simple loops
+        # Load timestamps AND prices to detect day changes
+        self.csv_timestamps = []
         self.csv_prices = []
+        
         try:
             with open("real_market_data.csv", mode="r") as f:
                 reader = csv.reader(f)
-                header = next(reader) 
+                header = next(reader)
                 for row in reader:
-                    close_price = float(row[4])
-                    self.csv_prices.append(close_price)
+                    # row[0] is timestamp (e.g., "2026-05-20T14:35:00Z")
+                    # We just take the first 10 characters to get the date: "2026-05-20"
+                    self.csv_timestamps.append(row[0][:10])
+                    self.csv_prices.append(float(row[4]))
         except Exception as e:
             print(f"Error loading CSV file: {e}")
-        
+            
         self.max_episode_steps = len(self.csv_prices) - 1
-        if self.max_episode_steps <= 0:
-            self.max_episode_steps = 200 # fallback
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        
-        if self.engine is not None:
-            try:
-                self.engine = nexus_engine.OrderBook()
-            except:
-                pass
-                
         self.balance = self.initial_balance
         self.position = 0
         self.net_worth = self.initial_balance
         self.price_history = []
         self.current_step = 0
-
+        
         for i in range(min(35, len(self.csv_prices))):
             self.price_history.append(self.csv_prices[i])
             self.current_step += 1
@@ -66,14 +60,8 @@ class NexusTradingEnv(gym.Env):
         return self._get_obs(), {}
         
     def _get_obs(self):
-        # Read the active real price from our loaded historical list
-        current_real_price = 100.0
-        if self.current_step < len(self.csv_prices):
-            current_real_price = self.csv_prices[self.current_step]
-            
-        # Since we are backtesting offline, simulate spread around the historical price
-        bid = current_real_price - 0.02
-        ask = current_real_price + 0.02
+        current_real_price = self.csv_prices[self.current_step] if self.current_step < len(self.csv_prices) else 100.0
+        bid, ask = current_real_price - 0.01, current_real_price + 0.01
         
         sma = current_real_price
         if len(self.price_history) > 0:
@@ -84,20 +72,13 @@ class NexusTradingEnv(gym.Env):
             gains, losses = 0, 0
             for i in range(len(self.price_history) - 13, len(self.price_history)):
                 change = self.price_history[i] - self.price_history[i-1]
-                if change > 0:
-                    gains += change
-                else:
-                    losses += abs(change)
-            if losses == 0:
-                rsi = 100.0
-            else:
-                rsi = 100.0 - (100.0 / (1.0 + (gains / losses)))
+                if change > 0: gains += change
+                else: losses += abs(change)
+            rsi = 100.0 if losses == 0 else 100.0 - (100.0 / (1.0 + (gains / losses)))
                 
         macd = 0.0
         if len(self.price_history) >= 26:
-            ema12 = sum(self.price_history[-12:]) / 12
-            ema26 = sum(self.price_history[-26:]) / 26
-            macd = ema12 - ema26
+            macd = (sum(self.price_history[-12:]) / 12) - (sum(self.price_history[-26:]) / 26)
             
         return np.array([bid, ask, self.balance, self.position, sma, rsi, macd], dtype=np.float32)
 
@@ -108,35 +89,51 @@ class NexusTradingEnv(gym.Env):
         obs = self._get_obs()
         bid, ask = obs[0], obs[1]
         mid_price = (bid + ask) / 2.0
-            
         self.price_history.append(mid_price)
-        if len(self.price_history) > 35:
-            self.price_history.pop(0)
+        if len(self.price_history) > 35: self.price_history.pop(0)
             
-        trade_executed = False
-        
-        if action == 1: # BUY 10 shares
-            estimated_cost = ask * 10
-            if self.balance >= estimated_cost:
-                self.balance -= estimated_cost
-                self.position += 10
-                trade_executed = True
-                
-        elif action == 2: # SELL 10 shares
-            if self.position >= 10:
-                self.balance += (bid * 10)
-                self.position -= 10
-                trade_executed = True
+        # 1. Check if the trading day is ending right now!
+        day_ended = False
+        if self.current_step < len(self.csv_timestamps) - 1:
+            current_day = self.csv_timestamps[self.current_step]
+            next_minute_day = self.csv_timestamps[self.current_step + 1]
+            
+            # If the next row is a different date, the market is closing!
+            if current_day != next_minute_day:
+                day_ended = True
+
+        # 2. Force liquidation rule for day-trading
+        if day_ended and self.position > 0:
+            # Emergency auto-sell at market close bid price
+            self.balance += (bid * self.position)
+            print(f"🚨 Market Close! Force-liquidating position of {self.position} shares.")
+            self.position = 0
+            action = 0 # Force override action to hold since we are flat
+            trade_executed = True
+        else:
+            # Normal trading actions
+            trade_executed = False
+            if action == 1: # BUY 10 shares
+                estimated_cost = ask * 10
+                if self.balance >= estimated_cost:
+                    self.balance -= estimated_cost
+                    self.position += 10
+                    trade_executed = True
+            elif action == 2: # SELL 10 shares
+                if self.position >= 10:
+                    self.balance += (bid * 10)
+                    self.position -= 10
+                    trade_executed = True
             
         new_obs = self._get_obs()
         self.net_worth = self.balance + (self.position * new_obs[0])
         
-        # Reward function focused on net worth changes
+        # Reward design
         reward = self.net_worth - prev_net_worth
         if (action == 1 or action == 2) and not trade_executed:
             reward -= 2.0 
         if action == 0:
-            reward -= 0.05 # minor holding fee
+            reward -= 0.01 # minor penalty to keep it moving
             
         terminated = False
         truncated = False
@@ -145,10 +142,4 @@ class NexusTradingEnv(gym.Env):
             terminated = True
             truncated = True
             
-        info = {
-            "balance": self.balance,
-            "position": self.position,
-            "net_worth": self.net_worth
-        }
-        
-        return new_obs, reward, terminated, truncated, info
+        return new_obs, reward, terminated, truncated, {"net_worth": self.net_worth}
