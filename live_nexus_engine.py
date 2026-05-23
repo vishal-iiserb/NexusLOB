@@ -18,7 +18,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("NexusEngine")
 
 print("\n" + "="*70)
-print("🚀 NEXUS QUANT ENGINE: KELLY POSITION MATRIX v2.1")
+print("🚀 NEXUS QUANT ENGINE: MTF EAGLE EYE v3.0")
 print("="*70)
 
 API_KEY = "PKU2E7QDWC6JGEJVIPMW3OITPH"
@@ -40,15 +40,13 @@ try:
     cpp_lib.check_volume_spike.argtypes = [ctypes.POINTER(ctypes.c_double), ctypes.c_int, ctypes.c_double]
     cpp_lib.check_volume_spike.restype = ctypes.c_int
 
-    cpp_lib.calculate_atr.argtypes = [
-        ctypes.POINTER(ctypes.c_double), 
-        ctypes.POINTER(ctypes.c_double), 
-        ctypes.POINTER(ctypes.c_double), 
-        ctypes.c_int
-    ]
+    cpp_lib.calculate_atr.argtypes = [ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double), ctypes.c_int]
     cpp_lib.calculate_atr.restype = ctypes.c_double
     
-    logger.info("⚡ Smart C++ Library with ATR capability loaded.")
+    cpp_lib.calculate_sma.argtypes = [ctypes.POINTER(ctypes.c_double), ctypes.c_int]
+    cpp_lib.calculate_sma.restype = ctypes.c_double
+    
+    logger.info("⚡ Smart C++ Library with MTF capability loaded.")
 except Exception as e:
     logger.error(f"Failed to load C++ library: {e}")
     sys.exit(1)
@@ -58,6 +56,7 @@ wss_client = StockDataStream(API_KEY, SECRET_KEY)
 historical_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 
 LOOKBACK_PERIOD = 20  
+MACRO_PERIOD = 200
 
 price_history = []
 volume_history = []
@@ -71,7 +70,7 @@ except Exception as e:
     logger.error(f"Broker connection failed: {e}")
     sys.exit(1)
 
-logger.info("🔥 Syncing history since morning bell to calculate daily ATR...")
+logger.info("🔥 Syncing history since morning bell to calculate daily ATR and Macro Trend...")
 try:
     eastern = pytz.timezone('US/Eastern')
     now_est = datetime.now(eastern)
@@ -113,14 +112,14 @@ async def on_minute_candle(bar):
     high_history.append(current_high)
     low_history.append(current_low)
     
-    if len(price_history) > 400:
+    if len(price_history) > 500:
         price_history.pop(0)
         volume_history.pop(0)
         high_history.pop(0)
         low_history.pop(0)
         
-    if len(price_history) < LOOKBACK_PERIOD:
-        logger.info(f"📊 Building initial lookback data framework... ({len(price_history)}/{LOOKBACK_PERIOD})")
+    if len(price_history) < MACRO_PERIOD:
+        logger.info(f"📊 Building initial lookback data framework... ({len(price_history)}/{MACRO_PERIOD})")
         return
 
     c_prices = (ctypes.c_double * LOOKBACK_PERIOD)(*price_history[-LOOKBACK_PERIOD:])
@@ -128,12 +127,16 @@ async def on_minute_candle(bar):
     c_highs = (ctypes.c_double * LOOKBACK_PERIOD)(*high_history[-LOOKBACK_PERIOD:])
     c_lows = (ctypes.c_double * LOOKBACK_PERIOD)(*low_history[-LOOKBACK_PERIOD:])
     
+    c_macro_prices = (ctypes.c_double * MACRO_PERIOD)(*price_history[-MACRO_PERIOD:])
+    
     std_dev = cpp_lib.calculate_std(c_prices, LOOKBACK_PERIOD)
     vwap = cpp_lib.calculate_vwap(c_prices, c_volumes, 15)
     is_vol_spike = cpp_lib.check_volume_spike(c_volumes, LOOKBACK_PERIOD, current_vol)
     market_atr = cpp_lib.calculate_atr(c_highs, c_lows, c_prices, LOOKBACK_PERIOD)
+    macro_sma = cpp_lib.calculate_sma(c_macro_prices, MACRO_PERIOD)
 
-    logger.info(f"📊 Live {SYMBOL}: ${current_price:.2f} | VWAP: ${vwap:.2f} | Current ATR Volatility: ${market_atr:.2f}")
+    trend_status = "UPTREND" if current_price > macro_sma else "DOWNTREND"
+    logger.info(f"📊 {SYMBOL}: ${current_price:.2f} | VWAP: ${vwap:.2f} | ATR: ${market_atr:.2f} | 200-SMA: ${macro_sma:.2f} [{trend_status}]")
 
     positions = trading_client.get_all_positions()
     portfolio = {p.symbol: p for p in positions}
@@ -155,7 +158,7 @@ async def on_minute_candle(bar):
     if not is_holding:
         buy_threshold = vwap - (std_dev * 1.0)
         
-        if current_price < buy_threshold and is_vol_spike == 1:
+        if current_price < buy_threshold and is_vol_spike == 1 and current_price > macro_sma:
             account_data = trading_client.get_account()
             buying_power = float(account_data.buying_power)
             
@@ -177,7 +180,7 @@ async def on_minute_candle(bar):
                         limit_price=limit_price
                     )
                     trading_client.submit_order(order_data=buy_order)
-                    logger.info(f"🔥 [ENTRY] Kelly Allocation ({safe_allocation*100:.1f}%) triggered. Buying {shares_to_buy} shares at LIMIT ${limit_price}")
+                    logger.info(f"🔥 [ENTRY] Trend Verified. Kelly Allocation ({safe_allocation*100:.1f}%) triggered. Buying {shares_to_buy} shares at LIMIT ${limit_price}")
                 except Exception as e:
                     logger.error(f"Entry order failed: {e}")
                     

@@ -1,66 +1,64 @@
 #include <cmath>
-#include <numeric>
 #include <algorithm>
 
-extern "C" {
-    
-    // Student Note: Calculates Standard Deviation for price bands
-    double calculate_std(const double* prices, int length) {
-        if (length <= 0) return 0.01;
-        
-        double sum = 0.0;
-        for (int i = 0; i < length; ++i) sum += prices[i];
-        double mean = sum / length;
-        
-        double sq_sum = 0.0;
-        for (int i = 0; i < length; ++i) {
-            sq_sum += (prices[i] - mean) * (prices[i] - mean);
-        }
-        double std_dev = std::sqrt(sq_sum / length);
-        return (std_dev == 0.0) ? 0.01 : std_dev;
+extern "C" __declspec(dllexport) double calculate_std(double* prices, int period) {
+    if (period <= 1) return 0.0;
+    double sum = 0.0;
+    for (int i = 0; i < period; ++i) {
+        sum += prices[i];
     }
-
-    // Student Note: Calculates Volume Weighted Average Price (VWAP)
-    double calculate_vwap(const double* prices, const double* volumes, int length) {
-        double total_pv = 0.0;
-        double total_vol = 0.0;
-        
-        for (int i = 0; i < length; ++i) {
-            total_pv += prices[i] * volumes[i];
-            total_vol += volumes[i];
-        }
-        
-        if (total_vol == 0.0) return prices[length - 1];
-        return total_pv / total_vol;
+    double mean = sum / period;
+    double variance_sum = 0.0;
+    for (int i = 0; i < period; ++i) {
+        double diff = prices[i] - mean;
+        variance_sum += diff * diff;
     }
+    return std::sqrt(variance_sum / (period - 1));
+}
 
-    // Student Note: Checks if current volume spikes past 1.2x of the average lookback
-    int check_volume_spike(const double* volumes, int length, double current_vol) {
-        double sum = 0.0;
-        for (int i = 0; i < length; ++i) sum += volumes[i];
-        double avg_vol = sum / length;
-        
-        return (current_vol > (avg_vol * 1.2)) ? 1 : 0;
+extern "C" __declspec(dllexport) double calculate_vwap(double* prices, double* volumes, int period) {
+    if (period <= 0) return 0.0;
+    double cumulative_vp = 0.0;
+    double cumulative_volume = 0.0;
+    for (int i = 0; i < period; ++i) {
+        cumulative_vp += prices[i] * volumes[i];
+        cumulative_volume += volumes[i];
     }
+    if (cumulative_volume == 0) return prices[period - 1];
+    return cumulative_vp / cumulative_volume;
+}
 
-    // NEW STUDENT FEATURE: Calculate Average True Range (ATR) to measure market speed
-    // It looks at the True Range of the recent candles to find the average per-minute move in dollars
-    double calculate_atr(const double* highs, const double* lows, const double* closes, int length) {
-        if (length <= 1) return 1.0; // Fail-safe fallback value
-
-        double total_true_range = 0.0;
-        
-        for (int i = 1; i < length; ++i) {
-            double tr1 = highs[i] - lows[i];                    // Current High minus Current Low
-            double tr2 = std::abs(highs[i] - closes[i - 1]);     // Current High minus Previous Close
-            double tr3 = std::abs(lows[i] - closes[i - 1]);      // Current Low minus Previous Close
-            
-            // Student logic: Find the maximum of the three True Range values
-            double true_range = std::max({tr1, tr2, tr3});
-            total_true_range += true_range;
-        }
-        
-        double average_true_range = total_true_range / (length - 1);
-        return (average_true_range <= 0.0) ? 0.50 : average_true_range; // Never return 0
+extern "C" __declspec(dllexport) int check_volume_spike(double* volumes, int period, double current_volume) {
+    if (period <= 0) return 0;
+    double sum = 0.0;
+    for (int i = 0; i < period; ++i) {
+        sum += volumes[i];
     }
+    double avg_volume = sum / period;
+    if (current_volume > (avg_volume * 2.0)) {
+        return 1;
+    }
+    return 0;
+}
+
+extern "C" __declspec(dllexport) double calculate_atr(double* highs, double* lows, double* closes, int period) {
+    if (period <= 1) return 0.0;
+    double tr_sum = 0.0;
+    for (int i = 1; i < period; ++i) {
+        double hl = highs[i] - lows[i];
+        double hc = std::abs(highs[i] - closes[i - 1]);
+        double lc = std::abs(lows[i] - closes[i - 1]);
+        double tr = std::max({hl, hc, lc});
+        tr_sum += tr;
+    }
+    return tr_sum / (period - 1);
+}
+
+extern "C" __declspec(dllexport) double calculate_sma(double* prices, int period) {
+    if (period <= 0) return 0.0;
+    double sum = 0.0;
+    for (int i = 0; i < period; ++i) {
+        sum += prices[i];
+    }
+    return sum / period;
 }
