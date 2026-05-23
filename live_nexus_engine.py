@@ -18,12 +18,20 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("NexusEngine")
 
 print("\n" + "="*70)
-print("🚀 NEXUS QUANT ENGINE: MTF EAGLE EYE v3.0")
+print("🚀 NEXUS QUANT ENGINE: MTF EAGLE EYE v3.1 (WEB CONNECTED)")
 print("="*70)
 
 API_KEY = "PKU2E7QDWC6JGEJVIPMW3OITPH"
 SECRET_KEY = "76VqRXpZUc1v5PAwuW84fJMf5UnkWRKKVoE3yCBbFkr9"
-SYMBOL = "SPY"
+
+try:
+    with open("bot_memory.json", "r") as f:
+        memory = json.load(f)
+    SYMBOL = memory.get("target_symbol", "SPY")
+except Exception:
+    SYMBOL = "SPY"
+
+logger.info(f"🎯 Target Symbol Acquired from Web Dashboard: {SYMBOL}")
 
 try:
     if sys.platform.startswith("win"):
@@ -70,7 +78,7 @@ except Exception as e:
     logger.error(f"Broker connection failed: {e}")
     sys.exit(1)
 
-logger.info("🔥 Syncing history since morning bell to calculate daily ATR and Macro Trend...")
+logger.info(f"🔥 Syncing {SYMBOL} history since morning bell to calculate daily ATR and Macro Trend...")
 try:
     eastern = pytz.timezone('US/Eastern')
     now_est = datetime.now(eastern)
