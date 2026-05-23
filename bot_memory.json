@@ -1,0 +1,7 @@
+{
+    "market_regime": "stable_trend",
+    "win_rate": 0.71,
+    "atr_stop_multiplier": 1.5,
+    "atr_profit_multiplier": 3.0,
+    "max_account_risk_limit": 0.5
+}
