@@ -13,12 +13,12 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import LimitOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 
-# Set up clean logging
+# Setup clean, readable logs
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger("NexusEngine")
 
 print("\n" + "="*70)
-print("🚀 NEXUS HYBRID ENGINE: INSTITUTIONAL VWAP & TRAILING LOCK")
+print("🚀 NEXUS QUANT ENGINE: ADAPTIVE ATR VOLATILITY CEILING v2.0")
 print("="*70)
 
 # --- 1. CONFIGURATION & KEYS ---
@@ -41,9 +41,19 @@ try:
 
     cpp_lib.check_volume_spike.argtypes = [ctypes.POINTER(ctypes.c_double), ctypes.c_int, ctypes.c_double]
     cpp_lib.check_volume_spike.restype = ctypes.c_int
-    logger.info("⚡ C++ Core loaded successfully.")
+
+    # Linking the student ATR feature to Python ctypes
+    cpp_lib.calculate_atr.argtypes = [
+        ctypes.POINTER(ctypes.c_double), 
+        ctypes.POINTER(ctypes.c_double), 
+        ctypes.POINTER(ctypes.c_double), 
+        ctypes.c_int
+    ]
+    cpp_lib.calculate_atr.restype = ctypes.c_double
+    
+    logger.info("⚡ Smart C++ Library with ATR capability loaded.")
 except Exception as e:
-    logger.error(f"Failed to load C++ shared library: {e}")
+    logger.error(f"Failed to load C++ library: {e}")
     sys.exit(1)
 
 # --- 3. INITIALIZE BROKER CONNECTIONS ---
@@ -52,21 +62,22 @@ wss_client = StockDataStream(API_KEY, SECRET_KEY)
 historical_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 
 # --- 4. ENGINE STATE & ARRAYS ---
-LOOKBACK_PERIOD = 30
-VWAP_PERIOD = 15
+LOOKBACK_PERIOD = 20  # Student Note: 20 minutes is standard for tracking ATR momentum
 
 price_history = []
 volume_history = []
+high_history = []
+low_history = []
 
 try:
     account = trading_client.get_account()
-    logger.info(f"Connected to Alpaca. Current Liquidity: ${float(account.cash):,.2f}")
+    logger.info(f"Connected. Running paper portfolio. Cash: ${float(account.cash):,.2f}")
 except Exception as e:
     logger.error(f"Broker connection failed: {e}")
     sys.exit(1)
 
-# --- 5. INSTANT WARMUP ALGORITHM (FROM 9:30 AM EST) ---
-logger.info("🔥 Initiating Instant Cache Warmup from Market Open...")
+# --- 5. INSTANT CACHE WARMUP WITH HIGH/LOW/CLOSE DATA ---
+logger.info("🔥 Syncing history since morning bell to calculate daily ATR...")
 try:
     eastern = pytz.timezone('US/Eastern')
     now_est = datetime.now(eastern)
@@ -79,7 +90,6 @@ try:
             start=market_open,
             end=now_est
         )
-        
         historical_bars = historical_client.get_stock_bars(request_params)
         
         if SYMBOL in historical_bars.data:
@@ -87,44 +97,62 @@ try:
             for bar in bars_today:
                 price_history.append(float(bar.close))
                 volume_history.append(float(bar.volume))
+                high_history.append(float(bar.high))
+                low_history.append(float(bar.low))
                 
-        logger.info(f"✅ Cache Warmed: Pre-loaded {len(price_history)} bars since morning bell.")
+        logger.info(f"✅ Cache Loaded: Synced {len(price_history)} minutes of open market data.")
     else:
-        logger.info("Market has not opened yet today. Waiting for live data.")
+        logger.info("Market is closed. Waiting for data feeds.")
 except Exception as e:
-    logger.error(f"Warmup failed, building cache live. Error: {e}")
+    logger.error(f"Warmup failed, collecting arrays dynamically. Error: {e}")
 
 # --- 6. ULTRA-LOW OVERHEAD EVENT LISTENER ---
 async def on_minute_candle(bar):
-    global price_history, volume_history
+    global price_history, volume_history, high_history, low_history
     
     current_price = float(bar.close)
     current_vol = float(bar.volume)
+    current_high = float(bar.high)
+    current_low = float(bar.low)
     
     price_history.append(current_price)
     volume_history.append(current_vol)
+    high_history.append(current_high)
+    low_history.append(current_low)
     
-    if len(price_history) > 500:
+    # Cap size to prevent memory leaks over long days
+    if len(price_history) > 400:
         price_history.pop(0)
         volume_history.pop(0)
+        high_history.pop(0)
+        low_history.pop(0)
         
-    logger.info(f"📊 Market Update | {SYMBOL} Price: ${current_price:.2f} | Volume: {int(current_vol)}")
-
     if len(price_history) < LOOKBACK_PERIOD:
+        logger.info(f"📊 Building initial lookback data framework... ({len(price_history)}/{LOOKBACK_PERIOD})")
         return
 
+    # Convert recent historical lists into C++ structures
     c_prices = (ctypes.c_double * LOOKBACK_PERIOD)(*price_history[-LOOKBACK_PERIOD:])
     c_volumes = (ctypes.c_double * LOOKBACK_PERIOD)(*volume_history[-LOOKBACK_PERIOD:])
+    c_highs = (ctypes.c_double * LOOKBACK_PERIOD)(*high_history[-LOOKBACK_PERIOD:])
+    c_lows = (ctypes.c_double * LOOKBACK_PERIOD)(*low_history[-LOOKBACK_PERIOD:])
     
+    # Execute rapid underlying math operations
     std_dev = cpp_lib.calculate_std(c_prices, LOOKBACK_PERIOD)
-    vwap = cpp_lib.calculate_vwap(c_prices, c_volumes, VWAP_PERIOD)
+    vwap = cpp_lib.calculate_vwap(c_prices, c_volumes, 15)
     is_vol_spike = cpp_lib.check_volume_spike(c_volumes, LOOKBACK_PERIOD, current_vol)
+    
+    # DYNAMIC VALUE: Compute how many dollars the asset is swinging per minute right now
+    market_atr = cpp_lib.calculate_atr(c_highs, c_lows, c_prices, LOOKBACK_PERIOD)
 
+    logger.info(f"📊 Live {SYMBOL}: ${current_price:.2f} | VWAP: ${vwap:.2f} | Current ATR Volatility: ${market_atr:.2f}")
+
+    # Fetch positions to decide execution track
     positions = trading_client.get_all_positions()
     portfolio = {p.symbol: p for p in positions}
     is_holding = SYMBOL in portfolio
 
-    # --- 7. AGGRESSIVE EXECUTION & TRAILING LOCK LOGIC ---
+    # --- 7. ADAPTIVE EXECUTION LOGIC (ATR INFUSED) ---
     if not is_holding:
         buy_threshold = vwap - (std_dev * 1.0)
         
@@ -146,19 +174,21 @@ async def on_minute_candle(bar):
                         limit_price=limit_price
                     )
                     trading_client.submit_order(order_data=buy_order)
-                    logger.info(f"🔥 [ENTRY TRIGGERED] Entering long: {shares_to_buy} shares at LIMIT ${limit_price}")
+                    logger.info(f"🔥 [ENTRY] Volatility dip confirmed! Buying {shares_to_buy} shares at LIMIT ${limit_price}")
                 except Exception as e:
-                    logger.error(f"Order routing failed: {e}")
+                    logger.error(f"Entry order failed: {e}")
                     
     else:
         current_position = portfolio[SYMBOL]
         qty_held = int(current_position.qty)
         entry_cost = float(current_position.avg_entry_price)
         
-        return_pct = (current_price - entry_cost) / entry_cost
+        # Student logic: Instead of arbitrary fixed percents, we scale targets out dynamically using ATR dollars
+        stop_loss_target = round(entry_cost - (market_atr * 1.5), 2)
+        profit_lock_target = round(entry_cost + (market_atr * 3.0), 2)
         
-        # 1. HARD STOP-LOSS: Safety net (-0.10%)
-        if return_pct <= -0.0010:
+        # 1. SMART ADAPTIVE STOP LOSS
+        if current_price <= stop_loss_target:
             exit_limit = round(current_price * 0.9999, 2)
             try:
                 sell_order = LimitOrderRequest(
@@ -169,33 +199,32 @@ async def on_minute_candle(bar):
                     limit_price=exit_limit
                 )
                 trading_client.submit_order(order_data=sell_order)
-                logger.info(f"⚡ [STOP-LOSS TRIGGERED] Closing via STOP | Selling {qty_held} shares at LIMIT ${exit_limit}")
+                logger.info(f"⚡ [ATR STOP-LOSS HIT] Market speed exceeded threshold. Cutting loss at ${exit_limit}")
             except Exception as e:
-                logger.error(f"Exit transmission failure: {e}")
+                logger.error(f"Stop loss dispatch failure: {e}")
                 
-        # 2. DYNAMIC TRAILING PROFIT LOCK 
-        elif return_pct >= 0.0020:
-            if current_price < (entry_cost * 1.0020): 
-                exit_limit = round(current_price * 0.9999, 2)
-                try:
-                    sell_order = LimitOrderRequest(
-                        symbol=SYMBOL,
-                        qty=qty_held,
-                        side=OrderSide.SELL,
-                        time_in_force=TimeInForce.DAY,
-                        limit_price=exit_limit
-                    )
-                    trading_client.submit_order(order_data=sell_order)
-                    logger.info(f"⚡ [TRAILING LOCK] Momentum stalled. Closing with profit at LIMIT ${exit_limit}")
-                except Exception as e:
-                    logger.error(f"Exit transmission failure: {e}")
+        # 2. SMART ADAPTIVE PROFIT TARGET
+        elif current_price >= profit_lock_target:
+            exit_limit = round(current_price * 0.9999, 2)
+            try:
+                sell_order = LimitOrderRequest(
+                    symbol=SYMBOL,
+                    qty=qty_held,
+                    side=OrderSide.SELL,
+                    time_in_force=TimeInForce.DAY,
+                    limit_price=exit_limit
+                )
+                trading_client.submit_order(order_data=sell_order)
+                logger.info(f"💰 [ATR PROFIT CAPTURED] Hit dynamic volatility top. Selling at ${exit_limit}")
+            except Exception as e:
+                logger.error(f"Profit lock dispatch failure: {e}")
 
 # --- 8. INITIALIZE WEBSOCKET STREAM ---
 try:
     wss_client.subscribe_bars(on_minute_candle, SYMBOL)
-    logger.info(f"Monitoring {SYMBOL} infrastructure pipelines...")
+    logger.info(f"Websocket pipelines active. Monitoring {SYMBOL} metrics streams...")
     wss_client.run()
 except KeyboardInterrupt:
-    logger.info("Engine safely disconnected via user command.")
+    logger.info("Engine turned off cleanly by user.")
 except Exception as e:
-    logger.error(f"Stream interface crashed: {e}")
+    logger.error(f"Websocket stream disconnected: {e}")
