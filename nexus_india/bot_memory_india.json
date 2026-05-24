@@ -1,0 +1,9 @@
+{
+    "virtual_wallet": 10000.0,
+    "selected_stocks": ["ADANIENT", "RELIANCE", "TATASTEEL"],
+    "active_trades": {
+        "ADANIENT": {"is_holding": false, "entry_price": 0.0, "shares_held": 0, "pnl": 0.0, "atr_pct": 2.1},
+        "RELIANCE": {"is_holding": false, "entry_price": 0.0, "shares_held": 0, "pnl": 0.0, "atr_pct": 1.1},
+        "TATASTEEL": {"is_holding": false, "entry_price": 0.0, "shares_held": 0, "pnl": 0.0, "atr_pct": 1.8}
+    }
+}
